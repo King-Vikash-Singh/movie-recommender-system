@@ -1,7 +1,11 @@
-
 import pickle
 import html
+from pathlib import Path
+
 import streamlit as st
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 # -------------------------------
 # Page Configuration
@@ -12,29 +16,38 @@ st.set_page_config(
     layout="wide"
 )
 
+BASE_DIR = Path(__file__).resolve().parent
+MOVIE_FILE = BASE_DIR / "model" / "movie_list.pkl"
+
+
 # -------------------------------
-# Load Saved Model Files
+# Load Movie Data
 # -------------------------------
 @st.cache_resource
 def load_model():
-    with open("model/movie_list.pkl", "rb") as file:
+    with open(MOVIE_FILE, "rb") as file:
         movies_data = pickle.load(file)
 
-    with open("model/similarity.pkl", "rb") as file:
-        similarity_data = pickle.load(file)
+    if "title" not in movies_data.columns:
+        raise ValueError("Movie data mein 'title' column nahi mila.")
 
-    return movies_data, similarity_data
+    if "tags" not in movies_data.columns:
+        raise ValueError(
+            "Movie data mein 'tags' column nahi mila. "
+            "Notebook se movie_list.pkl check karo."
+        )
+
+    movies_data = movies_data.reset_index(drop=True).copy()
+    movies_data["tags"] = movies_data["tags"].fillna("").astype(str)
+
+    vectorizer = CountVectorizer(max_features=5000)
+    vectors = vectorizer.fit_transform(movies_data["tags"])
+
+    return movies_data, vectors
 
 
 try:
-    movies, similarity = load_model()
-
-except FileNotFoundError:
-    st.error(
-        "Model files nahi mili. Check karo ki model folder ke andar "
-        "movie_list.pkl aur similarity.pkl files maujood hain."
-    )
-    st.stop()
+    movies, vectors = load_model()
 
 except Exception as error:
     st.error(f"Model load nahi ho saka: {error}")
@@ -45,26 +58,33 @@ except Exception as error:
 # Recommendation Function
 # -------------------------------
 def recommend(movie):
-    matching_movies = movies[movies["title"] == movie]
+    matching_movies = movies.index[movies["title"] == movie].tolist()
 
-    if matching_movies.empty:
+    if not matching_movies:
         return []
 
-    index = matching_movies.index[0]
+    index = matching_movies[0]
 
-    distances = sorted(
-        list(enumerate(similarity[index])),
-        reverse=True,
-        key=lambda x: x[1]
-    )
+    # Calculate similarity for the selected movie only.
+    scores = cosine_similarity(vectors[index], vectors).flatten()
 
-    recommended_movie_names = []
+    # Highest similarity first; exclude the selected movie.
+    ranked_indices = scores.argsort()[::-1]
+    recommended_names = []
 
-    for i in distances[1:6]:
-        movie_name = movies.iloc[i[0]]["title"]
-        recommended_movie_names.append(movie_name)
+    for movie_index in ranked_indices:
+        if movie_index == index:
+            continue
 
-    return recommended_movie_names
+        name = movies.iloc[movie_index]["title"]
+
+        if name not in recommended_names:
+            recommended_names.append(name)
+
+        if len(recommended_names) == 5:
+            break
+
+    return recommended_names
 
 
 # -------------------------------
@@ -91,7 +111,6 @@ def show_movie_card(movie_name):
             font-size: 20px;
             font-weight: bold;
             overflow-wrap: anywhere;
-            word-break: normal;
         ">
             {safe_name}
         </div>
@@ -104,12 +123,9 @@ def show_movie_card(movie_name):
 # Streamlit User Interface
 # -------------------------------
 st.title("🎬 Movie Recommender System")
+st.write("Select a movie and discover five similar movies!")
 
-st.write(
-    "Select a movie and discover five similar movies!"
-)
-
-movie_list = movies["title"].values
+movie_list = movies["title"].dropna().tolist()
 
 selected_movie = st.selectbox(
     "Type or select a movie from the dropdown",
@@ -117,15 +133,11 @@ selected_movie = st.selectbox(
 )
 
 if st.button("Show Recommendation", type="primary"):
-
     with st.spinner("Finding recommendations..."):
         recommended_names = recommend(selected_movie)
 
     if not recommended_names:
-        st.warning(
-            "Is movie ke liye recommendations nahi mili."
-        )
-
+        st.warning("Is movie ke liye recommendations nahi mili.")
     else:
         st.subheader("Recommended Movies")
 
